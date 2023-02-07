@@ -1,0 +1,26 @@
+---
+title: "Untitled"
+author: "Nick Isaac"
+date: "06/02/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("source/STING_sim_funcs.r")
+```
+
+Create some data
+```{r }
+data <- createSimData()
+str(data)
+```
+
+
+
+
+```{r }
+out <- runModel(data=data, nit = 2000, nb = 1000)
+out
+```
+
