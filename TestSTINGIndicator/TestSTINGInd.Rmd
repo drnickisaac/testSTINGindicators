@@ -1,9 +1,16 @@
 ---
 title: "Test STING IDM v0.2"
 author: "Nick Isaac"
-date: "06/02/2023"
+date: "09/02/2023"
 output: html_document
 ---
+
+In this docuent, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme.
+Th
+
+In this iteration, the model has only one data type.
+Next steps:
+- parameterize simulations 
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -27,8 +34,8 @@ library(coda)
 
 Set some global parameters
 ```{r SetSimPars}
-nSites <- 10
-nVisits <- 2
+nSites <- 75 #10
+nVisits <- 5 #2
 sim.pars <- c(psi = 0.5, # proportion of occupied sites 
               mu.p1 = 0.5, # probability of detection at the peak of the phenology curve
               beta1 = 10, # date when detectability is highest (zero = 1st July)
@@ -74,11 +81,15 @@ Next step is to simulate some data for that model
 ```{r}
 # set the parameters for a simulation
 mcSim <- nimbleModel(modelcode,
-                     constants = list(nsite = nSites, nvisit = nVisits),
-                     data = list(nT = array(data = 5, dim = c(nSites, nVisits)),
-                                cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
-                                ),
-                     inits = as.list(sim.pars)
+                     #constants = list(nsite = nSites, nvisit = nVisits),
+                     constants = c(as.list(sim.pars), 
+                                   nsite = nSites, 
+                                   nvisit = nVisits,
+                                   nT = array(data = 5, dim = c(nSites, nVisits)),
+                                   cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
+                                )
+                     #inits = as.list(sim.pars)
+                     # I am confused about whether the sim pars should go in the constants or the inits
                      )
 
 # plot the dependencies of the model in a graph (only makes sense when the model is very simple)
@@ -103,6 +114,8 @@ CmcSim$y1
 # Query the model's relationships
 #CmcSim$getDependencies(c('psi'))
 ```
+I need to understand a little more about the simulation. 
+I've set beta1, beta2, psi & mu.p1 as initial values in this simulation model: is this the same as fixing them? Or should they go in constants?
 
 
 Summarise the simulated data
@@ -124,14 +137,19 @@ Now run the model
 ```{r runModel}
 # step 1 create an operational from from NIMBLE/JAGS/BUGS code
 model <- nimbleModel(code = modelcode, 
-                     constants = list(nsite = nSites, nvisit = nVisits),
-                     data = list(y1 = CmcSim$y1,
-                                 nT = array(data = 5, dim = c(nSites, nVisits)),
-                                 cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
-                                 ), 
+                     constants = list(nsite = nSites, 
+                                      nvisit = nVisits,
+                                      nT = array(data = 5, dim = c(nSites, nVisits)),
+                                      cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
+                                      ),
+                     data = list(y1 = CmcSim$y1), 
                      inits = list(z = apply(CmcSim$y1 > 0, 1, max), 
                                   psi = simSum["naiveOcc"], 
-                                  p1 = simSum["reportingRate_1"]))
+                                  mu.p1 = simSum["reportingRate_1"],
+                                  beta1 = 0,
+                                  beta2 = 50
+                                  ),
+                     )
 
 # I thought it would be possible to fit the model directly on mcSim, but this doesn't seem to be possible
 
@@ -151,7 +169,7 @@ Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is neces
 CoccMCMC <- compileNimble(occMCMC, project = model)
 
 # and now we can use either $run or runMCMC() on the compiled model object.
-runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 1000, niter = 2000, nchains = 3, samplesAsCodaMCMC = T)
+runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 15000, niter = 20000, nchains = 3, samplesAsCodaMCMC = T)
 ```
 
 Plots the MCMC traces
@@ -160,6 +178,9 @@ plot1 <- runMCMC_samples %>% ggs() %>% ggs_traceplot(greek = TRUE)
 plot2 <- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
 gridExtra::grid.arrange(plot1, plot2, ncol=2)
 ```
+With the current setup, the phenology parameters are estimated rather poorly (beta2 has been over-estimated)
+Possibly this is why mu.p1 has been under-estimated, although it could be an error somewhere in the code.
+
 
 Question: where do I find Rhat?
 
