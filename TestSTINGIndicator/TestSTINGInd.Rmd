@@ -1,5 +1,5 @@
 ---
-title: "Test STING IDM v0.1"
+title: "Test STING IDM v0.2"
 author: "Nick Isaac"
 date: "06/02/2023"
 output: html_document
@@ -22,24 +22,17 @@ library(coda)
 #  devtools::install_github('BiologicalRecordsCentre/sparta')
 #library(sparta)
 
-source("source/STING_sim_funcs.r")
+#source("source/STING_sim_funcs.r")
 ```
 
-Create some data
-```{r RunSimulation}
+Set some global parameters
+```{r SetSimPars}
 nSites <- 10
 nVisits <- 2
-psi.sim <- 0.5
-p1.sim <- 0.5
-data <- createSimData(nSite = nSites, nVis = nVisits, psi.tru = psi.sim , pDetPan = p1.sim)
-str(data)
-```
-
-Summarise those data and convert into a classical (JAGS) bugs_data object
-```{r }
-(simSum <- summariseSimData(data))
-bugs_data <- getBUGSdata(data)
-
+sim.pars <- c(psi = 0.5, # proportion of occupied sites 
+              mu.p1 = 0.5, # probability of detection at the peak of the phenology curve
+              beta1 = 10, # date when detectability is highest (zero = 1st July)
+              beta2 = 20) # standard deviation of detection phenology
 ```
 
 Define the model code in Nimble
@@ -54,70 +47,97 @@ modelcode <- nimbleCode({
   for (i in 1:nsite) {
     for (j in 1:nvisit) {
       y1[i,j] ~ dbin(size = nT[i,j], prob = Py[i,j]) # Observed data
-      Py[i,j]<- z[i] * p1
-    }
-  }
+      Py[i,j] <- z[i] * p1[i,j]
+      p1[i,j] <- mu.p1 * beta3 * f_JD[182 + cJulDate[i,j]]
+  }}
   
   # priors
   psi ~ dunif(0,1)
-  p1 ~ dunif(0,1)
+  mu.p1 ~ dunif(0, 1) # could replace with a logistic model
   
-  # derived parameters
+  ######################### Seasonality shared effect
+  beta1 ~ dunif(-182, 182) # peak detectability/activity: zero = 1 July
+  beta2 ~ T(dt(0, 1, 1), 0, 500) # Half Cauchy. Stdev of phenology. At sd=500 the curve is entirely flat
+  beta3 <- 1/max(f_JD[1:365]) # scaling parameter to ensure that beta3 * f_JD = 1 at the peak of the phenology, i.e. where cJulDate = beta1
+  
+  for (d in 1:365){
+    f_JD[d] <- 1/((2*3.14159265359)^0.5 * beta2) * exp(-((d - (beta1+182))^2 / (2* beta2^2)))
+  }
+  
+  #########################  derived parameters
   psi.fs <- mean(z[1:nsite])
 })
-
-#source("source/IDM_nimble.r") # reads in IDMcode as object
-#mc <- nimble::readBUGSmodel(model = "source/IDM.txt")
 ```
+
 
 Next step is to simulate some data for that model
 ```{r}
-#mc <- nimbleModel(IDMcode,
-#                  inits = list(z = apply(cbind(data$panTrapData, data$transectData), 1, max)),
-#                  data = getBUGSdata(data)
-#                  )
-
 # set the parameters for a simulation
 mcSim <- nimbleModel(modelcode,
                      constants = list(nsite = nSites, nvisit = nVisits),
-                     data = with(bugs_data, list(nT=nT)),
-                     inits = list(psi = psi.sim, p1 = p1.sim))
+                     data = list(nT = array(data = 5, dim = c(nSites, nVisits)),
+                                cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
+                                ),
+                     inits = as.list(sim.pars)
+                     )
 
-# plot the dependencies of the model in a graph
-library(igraph)
-plot(mcSim$getGraph())
+# plot the dependencies of the model in a graph (only makes sense when the model is very simple)
+#library(igraph)
+#plot(mcSim$getGraph())
 
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
 nodesToSim <- CmcSim$getDependencies(c("psi", "p1"),
                                            self = F, downstream = T)
-nodesToSim
+#nodesToSim
 CmcSim$simulate(nodesToSim)
 
 CmcSim$y1
-
-CmcSim$isData('y1') # still FALSE!
+#CmcSim$isData('y1') # still FALSE!
 
 # Determining the nodes and variables in a model
-CmcSim$getVarNames()
+#CmcSim$getVarNames()
 
 #note that lifted nodes can also correspond to different parametrizations
-CmcSim$getNodeNames()
+#CmcSim$getNodeNames()
 
 # Query the model's relationships
-CmcSim$getDependencies(c('psi'))
+#CmcSim$getDependencies(c('psi'))
 ```
+
+
+Summarise the simulated data
+```{r }
+#(simSum <- summariseSimData(data))
+#bugs_data <- getBUGSdata(data)
+occSites <- with(CmcSim, apply(cbind(y1), 1, max)>0)
+(simSum  <- c(
+    naiveOcc = mean(occSites),
+    reportingRate = mean(with(CmcSim, y1/nT)), # per pan trap
+    #meanCount = mean(data$transectData),
+    reportingRate_1 = mean(with(CmcSim, y1/nT)[occSites,])#, # per pan trap
+    #meanCount_1 = mean(data$transectData[occSites,])
+))
+```
+
 
 Now run the model
 ```{r runModel}
 # step 1 create an operational from from NIMBLE/JAGS/BUGS code
 model <- nimbleModel(code = modelcode, 
-                     constants = list(nvisit = bugs_data$nvisit, nsite = bugs_data$nsite),
-                     data = with(bugs_data, list(y1=y1, nT=nT)), 
-                     inits = list(z = apply(bugs_data$y1 > 0, 1, max), psi = simSum["naiveOcc"], p1 = 0.33))
+                     constants = list(nsite = nSites, nvisit = nVisits),
+                     data = list(y1 = CmcSim$y1,
+                                 nT = array(data = 5, dim = c(nSites, nVisits)),
+                                 cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
+                                 ), 
+                     inits = list(z = apply(CmcSim$y1 > 0, 1, max), 
+                                  psi = simSum["naiveOcc"], 
+                                  p1 = simSum["reportingRate_1"]))
+
+# I thought it would be possible to fit the model directly on mcSim, but this doesn't seem to be possible
 
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
-                     monitors = c('psi','p1', "psi.fs"), 
+                     monitors = c('psi','mu.p1', "psi.fs", "beta1", "beta2"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
 
@@ -131,22 +151,22 @@ Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is neces
 CoccMCMC <- compileNimble(occMCMC, project = model)
 
 # and now we can use either $run or runMCMC() on the compiled model object.
-runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 1000, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
+runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 1000, niter = 2000, nchains = 3, samplesAsCodaMCMC = T)
 ```
 
+Plots the MCMC traces
 ```{r diagnoseModel}
-p1<- runMCMC_samples %>% ggs() %>% ggs_traceplot(greek = TRUE)
-p2<- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
-gridExtra::grid.arrange(p1,p2,ncol=2)
-
-#CoccMCMC$run(10000)
-#run_samples <- as.matrix(CoccMCMC$mvSamples)
-
-#plot(runMCMC_samples[ , 'psi'], type = 'l', xlab = 'iteration',  ylab = expression(psi))
-#plot(runMCMC_samples[ , 'p1'], type = 'l', xlab = 'iteration',  ylab = expression(p1))
+plot1 <- runMCMC_samples %>% ggs() %>% ggs_traceplot(greek = TRUE)
+plot2 <- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
+gridExtra::grid.arrange(plot1, plot2, ncol=2)
 ```
-The plots are mislabelled, but never mind. Recall that on line 30 we set psi to 0.5. We set also p1 to 0.5, but that was per pantrap. The model is estimating this across nT different pans. Since we set nT to 5, 0.5^5 = 0.03125, which is pretty close to the modelled estimate.
 
+Question: where do I find Rhat?
+
+How do these compare with the simulated values?
+```{r}
+print(sim.pars)
+```
 
 plot detection phenology
 ```{r}
