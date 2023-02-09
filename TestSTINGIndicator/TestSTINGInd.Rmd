@@ -1,5 +1,5 @@
 ---
-title: "Untitled"
+title: "Test STING IDM v0.1"
 author: "Nick Isaac"
 date: "06/02/2023"
 output: html_document
@@ -7,20 +7,148 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+# load the packages, installing where required
+required.packages <- c("nimble", "ggmcmc", "coda")
+packages.to.install <- setdiff(required.packages, installed.packages())
+if(length(packages.to.install) > 0)
+  install.packages(packages.to.install)
+library(nimble)
+library(ggmcmc)
+library(coda)
+
+# for the phenology plot (could replace)
+#if(!"sparta" %in% installed.packages())
+#  devtools::install_github('BiologicalRecordsCentre/sparta')
+#library(sparta)
+
 source("source/STING_sim_funcs.r")
 ```
 
 Create some data
-```{r }
-data <- createSimData()
+```{r RunSimulation}
+nSites <- 10
+nVisits <- 2
+psi.sim <- 0.5
+p1.sim <- 0.5
+data <- createSimData(nSite = nSites, nVis = nVisits, psi.tru = psi.sim , pDetPan = p1.sim)
 str(data)
 ```
 
-
-
-
+Summarise those data and convert into a classical (JAGS) bugs_data object
 ```{r }
-out <- runModel(data=data, nit = 2000, nb = 1000)
-out
+(simSum <- summariseSimData(data))
+bugs_data <- getBUGSdata(data)
+
 ```
 
+Define the model code in Nimble
+```{r}
+modelcode <- nimbleCode({
+  # state model
+  for (i in 1:nsite) {
+    z[i] ~ dbern(psi) # True occupancy status
+  }  
+  
+  ######################### Obs model - pan traps
+  for (i in 1:nsite) {
+    for (j in 1:nvisit) {
+      y1[i,j] ~ dbin(size = nT[i,j], prob = Py[i,j]) # Observed data
+      Py[i,j]<- z[i] * p1
+    }
+  }
+  
+  # priors
+  psi ~ dunif(0,1)
+  p1 ~ dunif(0,1)
+  
+  # derived parameters
+  psi.fs <- mean(z[1:nsite])
+})
+
+#source("source/IDM_nimble.r") # reads in IDMcode as object
+#mc <- nimble::readBUGSmodel(model = "source/IDM.txt")
+```
+
+Next step is to simulate some data for that model
+```{r}
+#mc <- nimbleModel(IDMcode,
+#                  inits = list(z = apply(cbind(data$panTrapData, data$transectData), 1, max)),
+#                  data = getBUGSdata(data)
+#                  )
+
+# set the parameters for a simulation
+mcSim <- nimbleModel(modelcode,
+                     constants = list(nsite = nSites, nvisit = nVisits),
+                     data = with(bugs_data, list(nT=nT)),
+                     inits = list(psi = psi.sim, p1 = p1.sim))
+
+# plot the dependencies of the model in a graph
+library(igraph)
+plot(mcSim$getGraph())
+
+CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
+nodesToSim <- CmcSim$getDependencies(c("psi", "p1"),
+                                           self = F, downstream = T)
+nodesToSim
+CmcSim$simulate(nodesToSim)
+
+CmcSim$y1
+
+CmcSim$isData('y1') # still FALSE!
+
+# Determining the nodes and variables in a model
+CmcSim$getVarNames()
+
+#note that lifted nodes can also correspond to different parametrizations
+CmcSim$getNodeNames()
+
+# Query the model's relationships
+CmcSim$getDependencies(c('psi'))
+```
+
+Now run the model
+```{r runModel}
+# step 1 create an operational from from NIMBLE/JAGS/BUGS code
+model <- nimbleModel(code = modelcode, 
+                     constants = list(nvisit = bugs_data$nvisit, nsite = bugs_data$nsite),
+                     data = with(bugs_data, list(y1=y1, nT=nT)), 
+                     inits = list(z = apply(bugs_data$y1 > 0, 1, max), psi = simSum["naiveOcc"], p1 = 0.33))
+
+# step 2 build an MCMC object using buildMCMC(). we can add some customization here
+occMCMC <- buildMCMC(model, 
+                     monitors = c('psi','p1', "psi.fs"), 
+                     thin = 3, 
+                     useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
+
+# you can now run the mcmc (Uncompiled MCMC will be really slow)
+#runMCMC(occMCMC, niter = 5)
+
+# step 3 before compiling the MCMC object we need to compile the model first
+Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is necessary
+
+# now the MCMC (project = NIMBLE model already associated with a project)
+CoccMCMC <- compileNimble(occMCMC, project = model)
+
+# and now we can use either $run or runMCMC() on the compiled model object.
+runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 1000, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
+```
+
+```{r diagnoseModel}
+p1<- runMCMC_samples %>% ggs() %>% ggs_traceplot(greek = TRUE)
+p2<- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
+gridExtra::grid.arrange(p1,p2,ncol=2)
+
+#CoccMCMC$run(10000)
+#run_samples <- as.matrix(CoccMCMC$mvSamples)
+
+#plot(runMCMC_samples[ , 'psi'], type = 'l', xlab = 'iteration',  ylab = expression(psi))
+#plot(runMCMC_samples[ , 'p1'], type = 'l', xlab = 'iteration',  ylab = expression(p1))
+```
+The plots are mislabelled, but never mind. Recall that on line 30 we set psi to 0.5. We set also p1 to 0.5, but that was per pantrap. The model is estimating this across nT different pans. Since we set nT to 5, 0.5^5 = 0.03125, which is pretty close to the modelled estimate.
+
+
+plot detection phenology
+```{r}
+#sparta::plot_DetectionPhenology(model = model)
+```

@@ -67,11 +67,37 @@ createSimData <- function(nSite = 75,
          )
 }
 
+##############################################
+
+summariseSimData <- function(data){
+  occSites <- with(data, apply(cbind(panTrapData, transectData), 1, max)>0)
+  c(
+    naiveOcc = mean(occSites),
+    reportingRate = mean(data$panTrapData), # per pan trap day, not per trap
+    meanCount = mean(data$transectData),
+    reportingRate_1 = mean(data$panTrapData[occSites,]), # per pan trap day, not per trap
+    meanCount_1 = mean(data$transectData[occSites,])
+  )
+  # maybe add other summary stats (e.g. quantiles) on the counts
+}
 
 
 ##############################################
+
+getBUGSdata <- function(data){
+  with(data, list(y1 = panTrapData,
+                  y2 = transectData,
+                  JulDate = dates,
+                  nsite = dim(panTrapData)[1],
+                  nvisit = dim(panTrapData)[2],
+                  nT = matrix(nTraps, nr=dim(panTrapData)[1], nc=dim(panTrapData)[2])
+  ))
+}
+
+##############################################
+
 # fit the model
-# for now use JAGS. Replace with Nimble
+# for now use JAGS.
 runModel <- function(data, 
                      nit = 1000,
                      nb = 200, 
@@ -80,21 +106,15 @@ runModel <- function(data,
                      params = NULL){
   
   # coerce simulated data into a BUGS data object
-  bugs_data <- with(data, list(y1 = panTrapData,
-                               y2 = transectData,
-                               JulDate = dates,
-                               nsite = dim(panTrapData)[1],
-                               nvisit = dim(panTrapData)[2],
-                               nT = matrix(nTraps, nr=dim(panTrapData)[1], nc=dim(panTrapData)[2])
-                               )
-  )
-  print(str(bugs_data))
-  
+  bugs_data <- getBUGSdata(data)
+
   # initial values
   initiate <- function(z, nsite) {
     init <- list (z = as.numeric(z),
-                  alpha.p1 = runif(1, -2, 2),
-                  eta = rep(runif(1, -2, 2), nsite))
+                  alpha.p = runif(1, -2, 2),
+                  alpha.p2 = runif(1, -2, 2)
+                  #eta = rep(runif(1, -2, 2), nsite)
+                  )
   }
   
   zst <- rowSums(cbind(bugs_data$y1, bugs_data$y2)) > 0
@@ -102,9 +122,9 @@ runModel <- function(data,
                          simplify = F)
   
   if(is.null(params)) params <- c(
-              "psi.fs", "alpha.p1", "alpha.p2", 
+              "psi.fs", "alpha.p", "alpha.p2", 
               "beta1", "beta2", "beta3",
-              "muZ")
+              "psi.fs", "lambda")
   
   # main event
   out <- R2jags::jags(data = bugs_data, 
@@ -116,6 +136,7 @@ runModel <- function(data,
                n.chains = nchain,
                n.thin = nthin
   )
+  
   return(out)
 }
 
