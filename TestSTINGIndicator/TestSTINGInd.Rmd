@@ -6,11 +6,11 @@ output: html_document
 ---
 
 In this docuent, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme.
-Th
 
 In this iteration, the model has only one data type.
 Next steps:
-- parameterize simulations 
+- add transect walks (with shared parameters)
+- parameterize simulations using data from the pilot studies
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -37,7 +37,7 @@ Set some global parameters
 nSites <- 75 #10
 nVisits <- 5 #2
 sim.pars <- c(psi = 0.5, # proportion of occupied sites 
-              mu.p1 = 0.5, # probability of detection at the peak of the phenology curve
+              max.p1 = 0.5, # probability of detection at the peak of the phenology curve
               beta1 = 10, # date when detectability is highest (zero = 1st July)
               beta2 = 20) # standard deviation of detection phenology
 ```
@@ -55,12 +55,12 @@ modelcode <- nimbleCode({
     for (j in 1:nvisit) {
       y1[i,j] ~ dbin(size = nT[i,j], prob = Py[i,j]) # Observed data
       Py[i,j] <- z[i] * p1[i,j]
-      p1[i,j] <- mu.p1 * beta3 * f_JD[182 + cJulDate[i,j]]
+      p1[i,j] <- max.p1 * beta3 * f_JD[182 + cJulDate[i,j]]
   }}
   
   # priors
   psi ~ dunif(0,1)
-  mu.p1 ~ dunif(0, 1) # could replace with a logistic model
+  max.p1 ~ dunif(0, 1) # could replace with a logistic model
   
   ######################### Seasonality shared effect
   beta1 ~ dunif(-182, 182) # peak detectability/activity: zero = 1 July
@@ -82,19 +82,15 @@ Next step is to simulate some data for that model
 # set the parameters for a simulation
 mcSim <- nimbleModel(modelcode,
                      #constants = list(nsite = nSites, nvisit = nVisits),
-                     constants = c(as.list(sim.pars), 
+                     constants = list(#c(as.list(sim.pars), 
                                    nsite = nSites, 
                                    nvisit = nVisits,
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
                                    cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
-                                )
-                     #inits = as.list(sim.pars)
+                                ),
+                     inits = as.list(sim.pars)
                      # I am confused about whether the sim pars should go in the constants or the inits
                      )
-
-# plot the dependencies of the model in a graph (only makes sense when the model is very simple)
-#library(igraph)
-#plot(mcSim$getGraph())
 
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
 nodesToSim <- CmcSim$getDependencies(c("psi", "p1"),
@@ -103,7 +99,18 @@ nodesToSim <- CmcSim$getDependencies(c("psi", "p1"),
 CmcSim$simulate(nodesToSim)
 
 CmcSim$y1
+```
+I need to understand a little more about the simulation. 
+I've set beta1, beta2, psi & max.p1 as initial values in this simulation model: is this the same as fixing them? Or should they go in constants?
+
+
+
+```{r exploreModel, include=FALSE}
 #CmcSim$isData('y1') # still FALSE!
+
+# plot the dependencies of the model in a graph (only makes sense when the model is very simple)
+#library(igraph)
+#plot(mcSim$getGraph())
 
 # Determining the nodes and variables in a model
 #CmcSim$getVarNames()
@@ -114,20 +121,16 @@ CmcSim$y1
 # Query the model's relationships
 #CmcSim$getDependencies(c('psi'))
 ```
-I need to understand a little more about the simulation. 
-I've set beta1, beta2, psi & mu.p1 as initial values in this simulation model: is this the same as fixing them? Or should they go in constants?
 
 
 Summarise the simulated data
 ```{r }
-#(simSum <- summariseSimData(data))
-#bugs_data <- getBUGSdata(data)
 occSites <- with(CmcSim, apply(cbind(y1), 1, max)>0)
 (simSum  <- c(
     naiveOcc = mean(occSites),
-    reportingRate = mean(with(CmcSim, y1/nT)), # per pan trap
+    reportingRate = mean(with(CmcSim, y1/5)), # per pan trap
     #meanCount = mean(data$transectData),
-    reportingRate_1 = mean(with(CmcSim, y1/nT)[occSites,])#, # per pan trap
+    reportingRate_1 = mean(with(CmcSim, y1/5)[occSites,])#, # per pan trap
     #meanCount_1 = mean(data$transectData[occSites,])
 ))
 ```
@@ -145,17 +148,15 @@ model <- nimbleModel(code = modelcode,
                      data = list(y1 = CmcSim$y1), 
                      inits = list(z = apply(CmcSim$y1 > 0, 1, max), 
                                   psi = simSum["naiveOcc"], 
-                                  mu.p1 = simSum["reportingRate_1"],
+                                  max.p1 = simSum["reportingRate_1"],
                                   beta1 = 0,
-                                  beta2 = 50
-                                  ),
+                                  beta2 = 50)
                      )
-
 # I thought it would be possible to fit the model directly on mcSim, but this doesn't seem to be possible
 
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
-                     monitors = c('psi','mu.p1', "psi.fs", "beta1", "beta2"), 
+                     monitors = c('psi','max.p1', "psi.fs", "beta1", "beta2"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
 
@@ -179,7 +180,7 @@ plot2 <- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
 gridExtra::grid.arrange(plot1, plot2, ncol=2)
 ```
 With the current setup, the phenology parameters are estimated rather poorly (beta2 has been over-estimated)
-Possibly this is why mu.p1 has been under-estimated, although it could be an error somewhere in the code.
+Possibly this is why max.p1 has been under-estimated, although it could be an error somewhere in the code. (I do note that the mean is close to the value we initialised at - is this a coincidence?)
 
 
 Question: where do I find Rhat?
