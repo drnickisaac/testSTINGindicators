@@ -1,5 +1,5 @@
 ---
-title: "Test STING IDM v0.2"
+title: "Test STING IDM v0.3"
 author: "Nick Isaac"
 date: "09/02/2023"
 output: html_document
@@ -17,8 +17,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # load the packages, installing where required
 required.packages <- c("nimble", "ggmcmc", "coda")
-packages.to.install <- setdiff(required.packages, installed.packages())
-if(length(packages.to.install) > 0)
+installedPackages <- installed.packages()
+packages.to.install <- setdiff(required.packages, installedPackages)
+if(length(packages.to.install) > 0)  # can cause a crash
   install.packages(packages.to.install)
 library(nimble)
 library(ggmcmc)
@@ -35,11 +36,14 @@ library(coda)
 Set some global parameters
 ```{r SetSimPars}
 nSites <- 75 #10
-nVisits <- 5 #2
+nVisits <- 20
 sim.pars <- c(psi = 0.5, # proportion of occupied sites 
+              mu.lambda = 30, # mean abundance across sites (at peak of season)
               max.p1 = 0.5, # probability of detection at the peak of the phenology curve
               beta1 = 10, # date when detectability is highest (zero = 1st July)
               beta2 = 20) # standard deviation of detection phenology
+minDate <- -80 # earliest survey date. -80 corresponds to 80 days before 1 July, i.e. 11 April
+maxDate <- 120 # latest survey date. 120 corresponds to 120 days after 1 July, i.e. 28 October
 ```
 
 Define the model code in Nimble
@@ -48,6 +52,7 @@ modelcode <- nimbleCode({
   # state model
   for (i in 1:nsite) {
     z[i] ~ dbern(psi) # True occupancy status
+    lambda[i] ~ dpois(mu.lambda)
   }  
   
   ######################### Obs model - pan traps
@@ -58,9 +63,19 @@ modelcode <- nimbleCode({
       p1[i,j] <- max.p1 * beta3 * f_JD[182 + cJulDate[i,j]]
   }}
   
-  # priors
+  ######################### Obs model - transects
+  
+  for (i in 1:nsite) {
+    for (j in 1:nvisit) {
+      y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
+      lambdaThin[i,j] <- lambda[i] * beta3 * f_JD[182 + cJulDate[i,j]]
+    }}
+  
+  ######################### priors
+  
   psi ~ dunif(0,1)
-  max.p1 ~ dunif(0, 1) # could replace with a logistic model
+  mu.lambda ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+  max.p1 ~ dunif(0, 1) # p1 is detection probability per pan trap at peak phenology; could replace with a logistic model
   
   ######################### Seasonality shared effect
   beta1 ~ dunif(-182, 182) # peak detectability/activity: zero = 1 July
@@ -86,20 +101,22 @@ mcSim <- nimbleModel(modelcode,
                                    nsite = nSites, 
                                    nvisit = nVisits,
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
-                                   cJulDate = round(array(runif(n = nSites*nVisits, min = -80, max = 120), dim = c(nSites, nVisits)), 0)
+                                   cJulDate = round(array(runif(n = nSites*nVisits, min = minDate, max = maxDate), dim = c(nSites, nVisits)), 0)
                                 ),
                      inits = as.list(sim.pars)
                      # I am confused about whether the sim pars should go in the constants or the inits
                      )
 
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
-nodesToSim <- CmcSim$getDependencies(c("psi", "p1"),
+nodesToSim <- CmcSim$getDependencies(c("psi", "mu.lambda", "p1"),
                                            self = F, downstream = T)
 #nodesToSim
 CmcSim$simulate(nodesToSim)
 
-CmcSim$y1
+head(CmcSim$y1)
+head(CmcSim$y2)
 ```
+
 I need to understand a little more about the simulation. 
 I've set beta1, beta2, psi & max.p1 as initial values in this simulation model: is this the same as fixing them? Or should they go in constants?
 
@@ -129,9 +146,9 @@ occSites <- with(CmcSim, apply(cbind(y1), 1, max)>0)
 (simSum  <- c(
     naiveOcc = mean(occSites),
     reportingRate = mean(with(CmcSim, y1/5)), # per pan trap
-    #meanCount = mean(data$transectData),
-    reportingRate_1 = mean(with(CmcSim, y1/5)[occSites,])#, # per pan trap
-    #meanCount_1 = mean(data$transectData[occSites,])
+    meanCount = mean(CmcSim$y2),
+    reportingRate_1 = mean(with(CmcSim, y1/5)[occSites,]), # per pan trap
+    meanCount_1 = mean(CmcSim$y2[occSites,])
 ))
 ```
 
@@ -139,6 +156,7 @@ occSites <- with(CmcSim, apply(cbind(y1), 1, max)>0)
 Now run the model
 ```{r runModel}
 # step 1 create an operational from from NIMBLE/JAGS/BUGS code
+#system.time({
 model <- nimbleModel(code = modelcode, 
                      constants = list(nsite = nSites, 
                                       nvisit = nVisits,
@@ -154,43 +172,84 @@ model <- nimbleModel(code = modelcode,
                      )
 # I thought it would be possible to fit the model directly on mcSim, but this doesn't seem to be possible
 
+
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
-                     monitors = c('psi','max.p1', "psi.fs", "beta1", "beta2"), 
+                     monitors = c('psi', "psi.fs", "mu.lambda", 'max.p1', "beta1", "beta2"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
-
-# you can now run the mcmc (Uncompiled MCMC will be really slow)
-#runMCMC(occMCMC, niter = 5)
+#}) #about 5 seconds
 
 # step 3 before compiling the MCMC object we need to compile the model first
+#system.time(
 Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is necessary
+#) # 25 seconds (less for fewer nodes)
 
 # now the MCMC (project = NIMBLE model already associated with a project)
+#system.time(
 CoccMCMC <- compileNimble(occMCMC, project = model)
+#) instananeous
 
 # and now we can use either $run or runMCMC() on the compiled model object.
-runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 15000, niter = 20000, nchains = 3, samplesAsCodaMCMC = T)
+system.time(
+runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 7500, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
+) # 17 seconds for 10K iterations 
 ```
 
-Plots the MCMC traces
+Plot the MCMC traces
 ```{r diagnoseModel}
 plot1 <- runMCMC_samples %>% ggs() %>% ggs_traceplot(greek = TRUE)
 plot2 <- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
 gridExtra::grid.arrange(plot1, plot2, ncol=2)
 ```
-With the current setup, the phenology parameters are estimated rather poorly (beta2 has been over-estimated)
+
+With the IDM, the phenology parameters are already estimated far better than  (beta2 has been over-estimated)
 Possibly this is why max.p1 has been under-estimated, although it could be an error somewhere in the code. (I do note that the mean is close to the value we initialised at - is this a coincidence?)
 
-
-Question: where do I find Rhat?
-
-How do these compare with the simulated values?
+Compare with simulated values
 ```{r}
-print(sim.pars)
+pars <- as.data.frame(summary(runMCMC_samples)$statistics)
+pars$simulated <- sim.pars[match(rownames(pars), names(sim.pars))]
 ```
+
+Some other diagnostics
+```{r diagnostics}
+# Rhat
+gelman.diag(runMCMC_samples)  
+
+# Autocorrelation plots
+#autocorr.plot(runMCMC_samples)
+```
+
 
 plot detection phenology
 ```{r}
 #sparta::plot_DetectionPhenology(model = model)
+
+beta1 <- melt(sapply(runMCMC_samples, function(x) x[,"beta2"]))$value
+beta2 <- melt(sapply(runMCMC_samples, function(x) x[,"beta1"]))$value
+
+jul_dates <- seq(from = minDate, to = maxDate, length.out=20)
+#cJD <- jul_dates - 183
+    
+pDet <- melt(sapply(jul_dates, function(jd){
+    (1/((2*pi)^0.5 * beta2) * exp(-((jd - beta1)^2 / (2* beta2^2))))
+  }))
+    
+pDetSumm <- pDet %>% 
+  group_by(Var2) %>%
+  summarise(mean = mean(value),
+            lowerCI = quantile(value, 0.025),
+            upperCI = quantile(value, 0.975)
+            ) %>%
+  ungroup()
+
+pDetSumm$JulDate <- jul_dates[pDetSumm$Var2]
+
+ggplot(data = pDetSumm, (aes(x=JulDate))) +
+  geom_line(aes(y=mean)) +
+  geom_ribbon(aes(ymin=lowerCI, ymax=upperCI), alpha=0.2) +
+  theme_bw() +
+  xlab("Julian Date (centred on 1 July)") +
+  ylab("Detection modifier")
 ```
