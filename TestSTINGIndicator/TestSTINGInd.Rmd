@@ -1,7 +1,7 @@
 ---
 title: "Test STING IDM v0.3"
 author: "Nick Isaac"
-date: "09/02/2023"
+date: "14/02/2023"
 output: html_document
 ---
 
@@ -58,9 +58,9 @@ modelcode <- nimbleCode({
       Py[i,j] <- z[i] * p1[i,j]
       p1[i,j] <- max.p1 * phScale * f_JD[JulDate[i,j]]
 
-       ##### transects 
-       y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
-       lambdaThin[i,j] <- lambda[i] * phScale * f_JD[JulDate[i,j]]
+      ##### transects 
+      y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
+      lambdaThin[i,j] <- lambda[i] * phScale * f_JD[JulDate[i,j]]
   }}
 
   ######################### priors
@@ -169,7 +169,7 @@ model <- nimbleModel(code = modelcode,
 
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
-                     monitors = c('psi', "mu.lambda", 'max.p1', "beta1", "beta2"),# "f_JD"), 
+                     monitors = c('psi', "mu.lambda", 'max.p1', "beta1", "beta2"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
 #about 5 seconds
@@ -184,7 +184,7 @@ CoccMCMC <- compileNimble(occMCMC, project = model)
 
 # and now we can use either $run or runMCMC() on the compiled model object.
 system.time(
-runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 17500, niter = 20000, nchains = 3, samplesAsCodaMCMC = T)
+runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 25000, niter = 30000, nchains = 3, samplesAsCodaMCMC = T)
 ) # 17 seconds for 10K iterations with 3 visits/site
 ```
 
@@ -221,7 +221,7 @@ Plot detection phenology
 beta1 <- melt(sapply(runMCMC_samples, function(x) x[,"beta1"]))$value
 beta2 <- melt(sapply(runMCMC_samples, function(x) x[,"beta2"]))$value
 
-jul_dates <- round(seq(from = 1, to = 365, length.out=50),0)
+jul_dates <- round(seq(from = 1, to = 365, length.out = 50),0)
 
 pDet <- melt(sapply(jul_dates, function(jd){
     (1/((2*pi)^0.5 * beta2) * exp(-((jd - beta1)^2 / (2* beta2^2))))
@@ -241,7 +241,6 @@ pDetSumm$JulDate <- jul_dates[pDetSumm$Var2]
   geom_line(aes(y=mean)) +
   geom_ribbon(aes(ymin=lowerCI, ymax=upperCI), alpha=0.2) +
   theme_bw() +
-  xlab("Julian Date") +
+  xlab("Julian Date (1 = 1st January)") +
   ylab("Detection modifier"))
-
 ```
