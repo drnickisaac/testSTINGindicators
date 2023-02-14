@@ -5,11 +5,10 @@ date: "09/02/2023"
 output: html_document
 ---
 
-In this docuent, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme.
+In this docuent, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme. In this iteration, there are two data types: pan traps and transect walks. Both data types are surveyed on the same day each year. There are `v` visits to `n` sites: both numbers can be modified. We first define the model, then simulate data using user-defined parameters. We then try to recover these parameters for one simulated dataset. At present, the only parameters shared between the data types are those the the detection phenology.
 
-In this iteration, the model has only one data type.
 Next steps:
-- add transect walks (with shared parameters)
+- add a covariate on the state model that is shared between data types.
 - parameterize simulations using data from the pilot studies
 
 ```{r setup, include=FALSE}
@@ -26,72 +25,56 @@ library(ggmcmc)
 library(coda)
 library(ggplot2)
 library(reshape2)
-
-# for the phenology plot (could replace)
-#if(!"sparta" %in% installed.packages())
-#  devtools::install_github('BiologicalRecordsCentre/sparta')
-#library(sparta)
-
-#source("source/STING_sim_funcs.r")
 ```
 
 Set some global parameters
 ```{r SetSimPars}
-nSites <- 175 #10
-nVisits <- 30
+nSites <- 75
+nVisits <- 10
+maxDate <- 250 # latest survey date. 250 = mid Sept
+minDate <- 100 # earliest survey date. 10 = mid April
 sim.pars <- c(psi = 0.5, # proportion of occupied sites 
               mu.lambda = 30, # mean abundance across sites (at peak of season)
               max.p1 = 0.5, # probability of detection at the peak of the phenology curve
-              beta1 = 200, # date when detectability is highest (zero = 1st July)
-#              beta1 = 10, # date when detectability is highest (zero = 1st July)
+              beta1 = 200, # date when detectability is highest
               beta2 = 20) # standard deviation of detection phenology
-maxDate <- 250#120 # latest survey date. 120 corresponds to 120 days after 1 July, i.e. 28 October
-minDate <- 100#-80 # earliest survey date. -80 corresponds to 80 days before 1 July, i.e. 11 April
 ```
 
 Define the model code in Nimble
 ```{r}
 modelcode <- nimbleCode({
-  # state model
+    ######################### state model
   for (i in 1:nsite) {
     z[i] ~ dbern(psi) # True occupancy status
     lambda[i] ~ dpois(mu.lambda)
   }  
   
-  ######################### Obs model - pan traps
+  ######################### Obs model
   for (i in 1:nsite) {
     for (j in 1:nvisit) {
+      
+      ##### pan traps
       y1[i,j] ~ dbin(size = nT[i,j], prob = Py[i,j]) # Observed data
       Py[i,j] <- z[i] * p1[i,j]
-      p1[i,j] <- max.p1 * beta3 * f_JD[cJulDate[i,j]]
-#      p1[i,j] <- max.p1 * beta3 * f_JD[182 + cJulDate[i,j]]
-# NB this assumes detection probability at 1 January is zero. Resolve with a nugget effect?      
+      p1[i,j] <- max.p1 * phScale * f_JD[JulDate[i,j]]
+
+       ##### transects 
+       y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
+       lambdaThin[i,j] <- lambda[i] * phScale * f_JD[JulDate[i,j]]
   }}
-  
-  ######################### Obs model - transects
-  
-  for (i in 1:nsite) {
-    for (j in 1:nvisit) {
-      y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
-#      lambdaThin[i,j] <- lambda[i] * beta3 * f_JD[182 + cJulDate[i,j]]
-      lambdaThin[i,j] <- lambda[i] * beta3 * f_JD[cJulDate[i,j]]
-  }}
-  
+
   ######################### priors
-  
   psi ~ dunif(0,1)
   mu.lambda ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
   max.p1 ~ dunif(0, 1) # p1 is detection probability per pan trap at peak phenology; could replace with a logistic model
   
   ######################### Seasonality shared effect
-  beta1 ~ dunif(1, 365) # peak detectability/activity: zero = 1 July
-#  beta1 ~ dunif(-182, 182) # peak detectability/activity: zero = 1 July
+  beta1 ~ dunif(1, 365) # peak detectability/activity
   beta2 ~ T(dt(0, 1, 1), 0, 500) # Half Cauchy. Stdev of phenology. At sd=500 the curve is entirely flat
-  beta3 <- 1/max(f_JD[1:365]) # scaling parameter to ensure that beta3 * f_JD = 1 at the peak of the phenology, i.e. where cJulDate = beta1
+  phScale <- 1/max(f_JD[1:365]) # scaling parameter to ensure that phScale * f_JD = 1 at the peak of the phenology, i.e. where JulDate = beta1
   
   for (d in 1:365){
     f_JD[d] <- 1/((2*3.14159265359)^0.5 * beta2) * exp(-((d - (beta1))^2 / (2* beta2^2)))
-  # f_JD[d] <- 1/((2*3.14159265359)^0.5 * beta2) * exp(-((d - (beta1+182))^2 / (2* beta2^2)))
     # could simplify this and evaluate only for dates in the dataset
   }
   
@@ -105,18 +88,19 @@ Next step is to simulate some data for that model
 ```{r}
 # set the parameters for a simulation
 mcSim <- nimbleModel(modelcode,
-                     #constants = list(nsite = nSites, nvisit = nVisits),
                      constants = list(nsite = nSites, 
                                    nvisit = nVisits,
-                                   beta1 = sim.pars["beta1"], beta2 = sim.pars["beta1"],
+                                   beta1 = sim.pars["beta1"],
+                                   beta2 = sim.pars["beta2"],
                                    psi = sim.pars["psi"],
                                    mu.lambda = sim.pars["mu.lambda"],
                                    max.p1 = sim.pars["max.p1"],
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
-                                   cJulDate = round(array(runif(n = nSites*nVisits, min = minDate, max = maxDate), dim = c(nSites, nVisits)), 0)
-                                ),
+                                   JulDate = round(array(runif(n = nSites*nVisits, 
+                                                               min = minDate, max = maxDate), 
+                                                         dim = c(nSites, nVisits)), 0)
+                                )
                      #inits = as.list(sim.pars)
-                     # I am confused about whether the sim pars should go in the constants or the inits
                      )
 
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
@@ -125,17 +109,15 @@ nodesToSim <- CmcSim$getDependencies(c("psi", "mu.lambda", "p1"),
 #nodesToSim
 CmcSim$simulate(nodesToSim)
 
-head(CmcSim$y1)
-head(CmcSim$y2)
+head(CmcSim$y1)[, 1:3]
+head(CmcSim$y2)[, 1:3]
 ```
 
-I need to understand a little more about the simulation. 
-I've set beta1, beta2, psi & max.p1 as initial values in this simulation model: is this the same as fixing them? Or should they go in constants?
-
+I think I finally understand the simulation: I've fixed the values of everything in the simulation except `y1` and `y2`.
 
 
 ```{r exploreModel, include=FALSE}
-#CmcSim$isData('y1') # still FALSE!
+#CmcSim$isData('y1') # FALSE
 
 # plot the dependencies of the model in a graph (only makes sense when the model is very simple)
 #library(igraph)
@@ -168,12 +150,12 @@ occSites <- with(CmcSim, apply(cbind(y1), 1, max)>0)
 Now run the model
 ```{r runModel}
 # step 1 create an operational from from NIMBLE/JAGS/BUGS code
-#system.time({
 model <- nimbleModel(code = modelcode, 
                      constants = list(nsite = nSites, 
                                       nvisit = nVisits,
                                       nT = array(data = 5, dim = c(nSites, nVisits)),
-                                      cJulDate = round(array(runif(n = nSites*nVisits, min = minDate, max = maxDate), 
+                                      JulDate = round(array(runif(n = nSites*nVisits, 
+                                                                  min = minDate, max = maxDate), 
                                                              dim = c(nSites, nVisits)), 0)
                                       ),
                      data = list(y1 = CmcSim$y1), 
@@ -181,33 +163,28 @@ model <- nimbleModel(code = modelcode,
                                   psi = simSum["naiveOcc"], 
                                   mu.lambda = simSum["meanCount_1"],
                                   max.p1 = simSum["reportingRate_1"],
-   #                               beta1 = 0,
                                   beta1 = 180,
                                   beta2 = 50)
                      )
-# I thought it would be possible to fit the model directly on mcSim, but this doesn't seem to be possible
-
 
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
                      monitors = c('psi', "mu.lambda", 'max.p1', "beta1", "beta2"),# "f_JD"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
-#}) #about 5 seconds
+#about 5 seconds
 
 # step 3 before compiling the MCMC object we need to compile the model first
-#system.time(
 Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is necessary
-#) # 25 seconds (less for fewer nodes)
+# 25 seconds (less for fewer nodes)
 
 # now the MCMC (project = NIMBLE model already associated with a project)
-#system.time(
 CoccMCMC <- compileNimble(occMCMC, project = model)
-#) instananeous
+# instananeous
 
 # and now we can use either $run or runMCMC() on the compiled model object.
 system.time(
-runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 7500, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
+runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 17500, niter = 20000, nchains = 3, samplesAsCodaMCMC = T)
 ) # 17 seconds for 10K iterations with 3 visits/site
 ```
 
@@ -218,7 +195,7 @@ plot2 <- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
 gridExtra::grid.arrange(plot1, plot2, ncol=2)
 ```
 
-With the IDM, the phenology parameters are already estimated far better than  (beta2 has been over-estimated)
+With the IDM, the phenology parameters are estimated far better than with the occupancy model.
 
 Compare with simulated values
 ```{r}
@@ -227,26 +204,25 @@ pars$simulated <- sim.pars[match(rownames(pars), names(sim.pars))]
 pars[,c(ncol(pars),1:(ncol(pars)-1))]
 ```
 
+It would be quite useful to have the median here as well.
+
 Some other diagnostics
 ```{r diagnostics}
 # Rhat
-gelman.diag(runMCMC_samples)  # this used to work - possibly psi.fs is causing problems
+gelman.diag(runMCMC_samples) # fails if psi.fs is included
 
 # Autocorrelation plots
 #autocorr.plot(runMCMC_samples)
 ```
 
 
-plot detection phenology
+Plot detection phenology
 ```{r}
-#sparta::plot_DetectionPhenology(model = model)
-
 beta1 <- melt(sapply(runMCMC_samples, function(x) x[,"beta1"]))$value
 beta2 <- melt(sapply(runMCMC_samples, function(x) x[,"beta2"]))$value
 
 jul_dates <- round(seq(from = 1, to = 365, length.out=50),0)
-#cJD <- jul_dates - 183
-    
+
 pDet <- melt(sapply(jul_dates, function(jd){
     (1/((2*pi)^0.5 * beta2) * exp(-((jd - beta1)^2 / (2* beta2^2))))
    }))
