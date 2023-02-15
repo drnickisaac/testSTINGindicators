@@ -1,5 +1,5 @@
 ---
-title: "Test STING IDM v0.3"
+title: "Test STING IDM v0.4"
 author: "Nick Isaac"
 date: "14/02/2023"
 output: html_document
@@ -30,12 +30,12 @@ library(reshape2)
 Set some global parameters
 ```{r SetSimPars}
 nSites <- 75
-nVisits <- 10
+nVisits <- 5
 maxDate <- 250 # latest survey date. 250 = mid Sept
 minDate <- 100 # earliest survey date. 10 = mid April
-sim.pars <- c(psi = 0.5, # proportion of occupied sites 
+sim.pars <- c(mu.psi = 0.5, # proportion of occupied sites 
               mu.lambda = 30, # mean abundance across sites (at peak of season)
-              max.p1 = 0.5, # probability of detection at the peak of the phenology curve
+              alpha.p = -2, # logit probability of detection 
               beta1 = 200, # date when detectability is highest
               beta2 = 20) # standard deviation of detection phenology
 ```
@@ -45,8 +45,11 @@ Define the model code in Nimble
 modelcode <- nimbleCode({
     ######################### state model
   for (i in 1:nsite) {
-    z[i] ~ dbern(psi) # True occupancy status
+    z[i] ~ dbern(psi[i]) # True occupancy status
     lambda[i] ~ dpois(mu.lambda)
+    log(lambda[i]) <- cloglcog(psi[i])
+    logit(psi[i]) <- logit(mu.psi) + eta[i] 
+    eta[i] ~ dnorm(0, tau.psi) 
   }  
   
   ######################### Obs model
@@ -56,17 +59,22 @@ modelcode <- nimbleCode({
       ##### pan traps
       y1[i,j] ~ dbin(size = nT[i,j], prob = Py[i,j]) # Observed data
       Py[i,j] <- z[i] * p1[i,j]
-      p1[i,j] <- max.p1 * phScale * f_JD[JulDate[i,j]]
+      logit(p1[i,j]) <- alpha.p + logit(pThin[i,j])
 
       ##### transects 
       y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
-      lambdaThin[i,j] <- lambda[i] * phScale * f_JD[JulDate[i,j]]
+      lambdaThin[i,j] <- lambda[i] * pThin[i,j]
+
+      #### shared: phenology
+      logit(pThin[i,j]) <- phScale * f_JD[JulDate[i,j]]
   }}
 
   ######################### priors
-  psi ~ dunif(0,1)
+  tau.si <- 1/(sigma.psi * sigma.psi) 
+  sigma.si ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
   mu.lambda ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
-  max.p1 ~ dunif(0, 1) # p1 is detection probability per pan trap at peak phenology; could replace with a logistic model
+  tau.psi <- T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+  alpha.p ~ dnorm(-2, 0.0001) # p1 is detection probability per pan trap at peak phenology; could replace with a logistic model
   
   ######################### Seasonality shared effect
   beta1 ~ dunif(1, 365) # peak detectability/activity
@@ -92,9 +100,9 @@ mcSim <- nimbleModel(modelcode,
                                    nvisit = nVisits,
                                    beta1 = sim.pars["beta1"],
                                    beta2 = sim.pars["beta2"],
-                                   psi = sim.pars["psi"],
+                                   mu.psi = sim.pars["mu.psi"],
                                    mu.lambda = sim.pars["mu.lambda"],
-                                   max.p1 = sim.pars["max.p1"],
+                                   alpha.p = sim.pars["alpha.p"],
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
                                    JulDate = round(array(runif(n = nSites*nVisits, 
                                                                min = minDate, max = maxDate), 
@@ -160,16 +168,16 @@ model <- nimbleModel(code = modelcode,
                                       ),
                      data = list(y1 = CmcSim$y1), 
                      inits = list(z = apply(CmcSim$y1 > 0, 1, max), 
-                                  psi = simSum["naiveOcc"], 
+                                  mu.psi = simSum["naiveOcc"], 
                                   mu.lambda = simSum["meanCount_1"],
-                                  max.p1 = simSum["reportingRate_1"],
+                                  alpha.p = simSum["reportingRate_1"],
                                   beta1 = 180,
                                   beta2 = 50)
                      )
 
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
-                     monitors = c('psi', "mu.lambda", 'max.p1', "beta1", "beta2"), 
+                     monitors = c('mu.psi', "mu.lambda", 'alpha.p', "beta1", "beta2"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
 #about 5 seconds
@@ -184,7 +192,7 @@ CoccMCMC <- compileNimble(occMCMC, project = model)
 
 # and now we can use either $run or runMCMC() on the compiled model object.
 system.time(
-runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 25000, niter = 30000, nchains = 3, samplesAsCodaMCMC = T)
+runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 7500, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
 ) # 17 seconds for 10K iterations with 3 visits/site
 ```
 
