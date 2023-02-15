@@ -33,11 +33,13 @@ nSites <- 75
 nVisits <- 5
 maxDate <- 250 # latest survey date. 250 = mid Sept
 minDate <- 100 # earliest survey date. 10 = mid April
-sim.pars <- c(mu.psi = 0.5, # proportion of occupied sites 
-              mu.lambda = 30, # mean abundance across sites (at peak of season)
-              alpha.p = -2, # logit probability of detection 
+sim.pars <- c(sigma.psi = 3, # stdev among sites in cloglog occupancy
+              #mu.psi = 0.5, # proportion of occupied sites 
+              mu.lambda = 30, # mean abundance across sites
+              alpha.p = 0.8, # logit probability of detection 
               beta1 = 200, # date when detectability is highest
-              beta2 = 20) # standard deviation of detection phenology
+              beta2 = 20, # standard deviation of detection phenology
+              phScale = 50) #
 ```
 
 Define the model code in Nimble
@@ -46,11 +48,17 @@ modelcode <- nimbleCode({
     ######################### state model
   for (i in 1:nsite) {
     z[i] ~ dbern(psi[i]) # True occupancy status
-    lambda[i] ~ dpois(mu.lambda)
-    log(lambda[i]) <- cloglcog(psi[i])
-    logit(psi[i]) <- logit(mu.psi) + eta[i] 
-    eta[i] ~ dnorm(0, tau.psi) 
+    log(lambda[i]) <- eta[i] 
+    cloglog(psi[i]) <- eta[i] 
+    #eta[i] ~ T(dnorm(mu.lambda, tau.psi), 0, Inf)
+    #eta[i]~T(dt(0, 1, 1), 0, Inf) # Half Cauchy 
+    eta[i] ~ dnorm(0, tau.psi)
   }  
+  
+  ######################### state model priors
+  tau.psi <- 1/(sigma.psi * sigma.psi) 
+  sigma.psi ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+  mu.lambda ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy  
   
   ######################### Obs model
   for (i in 1:nsite) {
@@ -59,8 +67,9 @@ modelcode <- nimbleCode({
       ##### pan traps
       y1[i,j] ~ dbin(size = nT[i,j], prob = Py[i,j]) # Observed data
       Py[i,j] <- z[i] * p1[i,j]
-      logit(p1[i,j]) <- alpha.p + logit(pThin[i,j])
-
+      logit(p1[i,j]) <- alpha.p #+ logit(pThin[i,j])
+      #p1[i,j] <- alpha.p * pThin[i,j]
+      
       ##### transects 
       y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
       lambdaThin[i,j] <- lambda[i] * pThin[i,j]
@@ -69,18 +78,14 @@ modelcode <- nimbleCode({
       logit(pThin[i,j]) <- phScale * f_JD[JulDate[i,j]]
   }}
 
-  ######################### priors
-  tau.si <- 1/(sigma.psi * sigma.psi) 
-  sigma.si ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
-  mu.lambda ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
-  tau.psi <- T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+  ######################### Obs model priors
+  phScale ~ dnorm(0, 0.0001)
   alpha.p ~ dnorm(-2, 0.0001) # p1 is detection probability per pan trap at peak phenology; could replace with a logistic model
   
   ######################### Seasonality shared effect
   beta1 ~ dunif(1, 365) # peak detectability/activity
   beta2 ~ T(dt(0, 1, 1), 0, 500) # Half Cauchy. Stdev of phenology. At sd=500 the curve is entirely flat
-  phScale <- 1/max(f_JD[1:365]) # scaling parameter to ensure that phScale * f_JD = 1 at the peak of the phenology, i.e. where JulDate = beta1
-  
+
   for (d in 1:365){
     f_JD[d] <- 1/((2*3.14159265359)^0.5 * beta2) * exp(-((d - (beta1))^2 / (2* beta2^2)))
     # could simplify this and evaluate only for dates in the dataset
@@ -98,10 +103,12 @@ Next step is to simulate some data for that model
 mcSim <- nimbleModel(modelcode,
                      constants = list(nsite = nSites, 
                                    nvisit = nVisits,
+                                   sigma.psi = sim.pars["sigma.psi"],
                                    beta1 = sim.pars["beta1"],
                                    beta2 = sim.pars["beta2"],
-                                   mu.psi = sim.pars["mu.psi"],
+                                   #mu.psi = sim.pars["mu.psi"],
                                    mu.lambda = sim.pars["mu.lambda"],
+                                   phScale = sim.pars["phScale"],
                                    alpha.p = sim.pars["alpha.p"],
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
                                    JulDate = round(array(runif(n = nSites*nVisits, 
@@ -112,7 +119,7 @@ mcSim <- nimbleModel(modelcode,
                      )
 
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
-nodesToSim <- CmcSim$getDependencies(c("psi", "mu.lambda", "p1"),
+nodesToSim <- CmcSim$getDependencies(c("psi", "lambda"),# "p1", "pThin"),
                                            self = F, downstream = T)
 #nodesToSim
 CmcSim$simulate(nodesToSim)
@@ -188,7 +195,7 @@ Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is neces
 
 # now the MCMC (project = NIMBLE model already associated with a project)
 CoccMCMC <- compileNimble(occMCMC, project = model)
-# instananeous
+# instantaneous
 
 # and now we can use either $run or runMCMC() on the compiled model object.
 system.time(
