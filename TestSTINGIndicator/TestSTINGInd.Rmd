@@ -29,13 +29,14 @@ library(reshape2)
 
 Set some global parameters
 ```{r SetSimPars}
-nSites <- 75
-nVisits <- 5
+nSites <- 10
+nVisits <- 2
 maxDate <- 250 # latest survey date. 250 = mid Sept
 minDate <- 100 # earliest survey date. 10 = mid April
-sim.pars <- c(sigma.psi = 3, # stdev among sites in cloglog occupancy
-              #mu.psi = 0.5, # proportion of occupied sites 
-              mu.lambda = 30, # mean abundance across sites
+sim.pars <- list(sigma.psi = 3, # stdev among sites in cloglog occupancy
+              alpha.s = 0, # state intercept
+              beta.s = 1, # state covariate
+              cov = rnorm(n = nSites),
               alpha.p = 0.8, # logit probability of detection 
               beta1 = 200, # date when detectability is highest
               beta2 = 20, # standard deviation of detection phenology
@@ -44,22 +45,26 @@ sim.pars <- c(sigma.psi = 3, # stdev among sites in cloglog occupancy
 
 Define the model code in Nimble
 ```{r}
+obsMod <- FALSE
 modelcode <- nimbleCode({
     ######################### state model
   for (i in 1:nsite) {
+    linPred[i] <- alpha.s + beta.s * cov[i] #+ eta[i]
+    log(lambda[i]) <- linPred[i] # simulation below returns NAs unless I make this a fixed number, e.g. 3
+    cloglog(psi[i]) <- linPred[i] #  simulation below returns NAs unless I make this a fixed number, e.g. 3
     z[i] ~ dbern(psi[i]) # True occupancy status
-    log(lambda[i]) <- eta[i] 
-    cloglog(psi[i]) <- eta[i] 
     #eta[i] ~ T(dnorm(mu.lambda, tau.psi), 0, Inf)
     #eta[i]~T(dt(0, 1, 1), 0, Inf) # Half Cauchy 
-    eta[i] ~ dnorm(0, tau.psi)
+    #eta[i] ~ dnorm(0, tau.psi)
+    #eta[i] ~ dnorm(0, sd = sigma.psi)
   }  
   
   ######################### state model priors
-  tau.psi <- 1/(sigma.psi * sigma.psi) 
+  alpha.s ~ dnorm(0, 0.0001)
+  beta.s ~ dnorm(0, 0.0001)
   sigma.psi ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
-  mu.lambda ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy  
-  
+
+if(obsMod){ # for debugging
   ######################### Obs model
   for (i in 1:nsite) {
     for (j in 1:nvisit) {
@@ -77,7 +82,7 @@ modelcode <- nimbleCode({
       #### shared: phenology
       logit(pThin[i,j]) <- phScale * f_JD[JulDate[i,j]]
   }}
-
+}
   ######################### Obs model priors
   phScale ~ dnorm(0, 0.0001)
   alpha.p ~ dnorm(-2, 0.0001) # p1 is detection probability per pan trap at peak phenology; could replace with a logistic model
@@ -106,8 +111,9 @@ mcSim <- nimbleModel(modelcode,
                                    sigma.psi = sim.pars["sigma.psi"],
                                    beta1 = sim.pars["beta1"],
                                    beta2 = sim.pars["beta2"],
-                                   #mu.psi = sim.pars["mu.psi"],
-                                   mu.lambda = sim.pars["mu.lambda"],
+                                   alpha.s = sim.pars["alpha.s"],
+                                   beta.s = sim.pars["beta.s"],
+                                   cov = sim.pars$cov,
                                    phScale = sim.pars["phScale"],
                                    alpha.p = sim.pars["alpha.p"],
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
@@ -119,13 +125,24 @@ mcSim <- nimbleModel(modelcode,
                      )
 
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
+
+
 nodesToSim <- CmcSim$getDependencies(c("psi", "lambda"),# "p1", "pThin"),
                                            self = F, downstream = T)
-#nodesToSim
+nodesToSim
 CmcSim$simulate(nodesToSim)
 
-head(CmcSim$y1)[, 1:3]
-head(CmcSim$y2)[, 1:3]
+head(CmcSim$y1)[, 1:2]
+head(CmcSim$y2)[, 1:2]
+
+##### temp
+
+#nodesToSim <- CmcSim$getDependencies(c("psi", "lambda", "p1", "pThin"),
+#                                           self = F, downstream = T)
+nodesToSim
+#head(CmcSim$eta)
+head(CmcSim$psi)
+head(CmcSim$z)
 ```
 
 I think I finally understand the simulation: I've fixed the values of everything in the simulation except `y1` and `y2`.
