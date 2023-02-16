@@ -41,7 +41,7 @@ library(reshape2)
 Set some global parameters
 ```{r SetSimPars}
 nSites <- 75
-nVisits <- 5
+nVisits <- 4
 maxDate <- 250 # latest survey date. 250 = mid Sept
 minDate <- 100 # earliest survey date. 10 = mid April
 sim.pars <- list(alpha.s = 0, # state intercept
