@@ -1,16 +1,28 @@
 ---
-title: "Test STING IDM v0.4"
+title: "Test STING IDM v0.5"
 author: "Nick Isaac"
-date: "14/02/2023"
+date: "16/02/2023"
 output: html_document
 ---
-  
-  In this document, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme. In this iteration, there are two data types: pan traps and transect walks. Both data types are surveyed on the same day each year. There are `v` visits to `n` sites: both numbers can be modified. We first define the model, then simulate data using user-defined parameters. We then try to recover these parameters for one simulated dataset. At present, the only parameters shared between the data types are those the the detection phenology.
+# Introduction
+In this document, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme. In this iteration, there are two data types: pan traps and transect walks. Both data types are surveyed on the same day each year. There are `v` visits to `n` sites: both numbers can be modified. We first define the model, then simulate data using user-defined parameters. We then try to recover these parameters for one simulated dataset. There are shared between the data types for a covariate and for the detection phenology.
 
-Next steps:
-- add a covariate on the state model that is shared between data types.
+## Priorities for future development
+In approximate order of priority:
+- Zero inflated Poisson
 - parameterize simulations using data from the pilot studies
+- missing visits
+- ignoring the phenology (even though it is important)
 
+Second tier priority
+- model the data types separately
+- Multispecies
+- Multi-year
+- spatially-explicit
+- Multi-national
+- is the model equally applicable to central place foragers vs others?
+
+# Setting up the model
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 # load the packages, installing where required
@@ -28,18 +40,20 @@ library(reshape2)
 
 Set some global parameters
 ```{r SetSimPars}
-nSites <- 10
-nVisits <- 2
+nSites <- 75
+nVisits <- 5
 maxDate <- 250 # latest survey date. 250 = mid Sept
 minDate <- 100 # earliest survey date. 10 = mid April
-sim.pars <- list(sigma.psi = 3, # stdev among sites in cloglog occupancy
-              alpha.s = 0, # state intercept
+sim.pars <- list(alpha.s = 0, # state intercept
               beta.s = 1, # state covariate
               cov = rnorm(n = nSites),
-              alpha.p = 0.8, # logit probability of detection 
+              alpha.p = 0, # logit probability of detection per pan trap (0 = 50%)
               beta1 = 200, # date when detectability is highest
-              beta2 = 20, # standard deviation of detection phenology
-              phScale = 50) #
+              beta2 = 30, # standard deviation of detection phenology
+              Multiplier = 50, # Multiplier for counts per unit intensity. 
+              phScale = 20) #
+Dates <- round(array(runif(n = nSites*nVisits, min = minDate, max = maxDate), 
+              dim = c(nSites, nVisits)), 0)
 ```
 
 Define the model code in Nimble
@@ -48,20 +62,16 @@ obsMod <- TRUE
 modelcode <- nimbleCode({
     ######################### state model
   for (i in 1:nsite) {
-    linPred[i] <- alpha.s + beta.s * cov[i] #+ eta[i]
-    log(lambda[i]) <- linPred[i] # simulation below returns NAs unless I make this a fixed number, e.g. 3
-    cloglog(psi[i]) <- linPred[i] #  simulation below returns NAs unless I make this a fixed number, e.g. 3
+    linPred[i] <- alpha.s + beta.s * cov[i]
+    log(lambda[i]) <- linPred[i] 
+    cloglog(psi[i]) <- linPred[i]
     z[i] ~ dbern(psi[i]) # True occupancy status
-    #eta[i] ~ T(dnorm(mu.lambda, tau.psi), 0, Inf)
-    #eta[i]~T(dt(0, 1, 1), 0, Inf) # Half Cauchy 
-    #eta[i] ~ dnorm(0, tau.psi)
-    #eta[i] ~ dnorm(0, sd = sigma.psi)
   }  
   
   ######################### state model priors
   alpha.s ~ dnorm(0, 0.0001)
   beta.s ~ dnorm(0, 0.0001)
-  sigma.psi ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
+
 if(obsMod){ # for debugging
   ######################### Obs model
   for (i in 1:nsite) {
@@ -70,23 +80,25 @@ if(obsMod){ # for debugging
       ##### pan traps
       y1[i,j] ~ dbin(size = nT[i,j], prob = Py[i,j]) # Observed data
       Py[i,j] <- z[i] * p1[i,j]
-      logit(p1[i,j]) <- alpha.p #+ logit(pThin[i,j])
-      #p1[i,j] <- alpha.p * pThin[i,j]
-      
+      logit(p1[i,j]) <- alpha.p + logit(pThin[i,j])
+
       ##### transects 
-      y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
-      lambdaThin[i,j] <- lambda[i] * pThin[i,j]
+      y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts. Might need a NegBin here or Zero-inflated
+      lambdaThin[i,j] <- Multiplier * lambda[i] * pThin[i,j]
+      
       #### shared: phenology
       logit(pThin[i,j]) <- phScale * f_JD[JulDate[i,j]]
   }}
 }
   ######################### Obs model priors
-  phScale ~ dnorm(0, 0.0001)
+  phScale ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
   alpha.p ~ dnorm(-2, 0.0001) # p1 is detection probability per pan trap at peak phenology; could replace with a logistic model
+  Multiplier ~ T(dt(0, 1, 1), 0, Inf)
   
   ######################### Seasonality shared effect
-  beta1 ~ dunif(1, 365) # peak detectability/activity
+  beta1 ~ dunif(100, 250) # peak detectability/activity. Constrained to fall within the field season
   beta2 ~ T(dt(0, 1, 1), 0, 500) # Half Cauchy. Stdev of phenology. At sd=500 the curve is entirely flat
+
   for (d in 1:365){
     f_JD[d] <- 1/((2*3.14159265359)^0.5 * beta2) * exp(-((d - (beta1))^2 / (2* beta2^2)))
     # could simplify this and evaluate only for dates in the dataset
@@ -94,52 +106,45 @@ if(obsMod){ # for debugging
   
   #########################  derived parameters
   psi.fs <- mean(z[1:nsite])
+  mu.lambda <- mean(lambda[1:nsite])
 })
 ```
 
-
+# Run Simulation
 Next step is to simulate some data for that model
 ```{r}
 # set the parameters for a simulation
 
-
 mcSim <- nimbleModel(modelcode,
                      constants = list(nsite = nSites, 
                                    nvisit = nVisits,
-                                   #Comment: NIMBLE has issues extracting the list, using the dollar  sign made the magic.
-                                   sigma.psi = sim.pars$sigma.psi,
-                                   beta1 = sim.pars$beta1,
-                                   beta2 = sim.pars$beta2,
                                    alpha.s = sim.pars$alpha.s,
                                    beta.s = sim.pars$beta.s,
                                    cov = sim.pars$cov,
                                    phScale = sim.pars$phScale,
                                    alpha.p = sim.pars$alpha.p,
+                                   Multiplier = sim.pars$Multiplier,
+                                   beta1 = sim.pars$beta1,
+                                   beta2 = sim.pars$beta2,
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
-                                   JulDate = round(array(runif(n = nSites*nVisits, 
-                                                               min = minDate, max = maxDate), 
-                                                         dim = c(nSites, nVisits)), 0)
+                                   JulDate = Dates
                                 )
                      #inits = as.list(sim.pars)
                      )
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
 nodesToSim <- CmcSim$getDependencies(c("psi", "lambda"),# "p1", "pThin"),
                                            self = F, downstream = T)
-nodesToSim
+#nodesToSim
 CmcSim$simulate(nodesToSim)
 #CmcSim$simulate()
-head(CmcSim$y1)[, 1:2]
-head(CmcSim$y2)[, 1:2]
-##### temp
-#nodesToSim <- CmcSim$getDependencies(c("psi", "lambda", "p1", "pThin"),
-#                                           self = F, downstream = T)
-nodesToSim
-#head(CmcSim$eta)
-head(CmcSim$psi)
-head(CmcSim$z)
+#head(CmcSim$y1)[, 1:2]
+#head(CmcSim$y2)[, 1:2]
+head(CmcSim$y1)
+head(CmcSim$y2)
+head(with(CmcSim, cbind(lambda, psi, z)))
 ```
 
-I think I finally understand the simulation: I've fixed the values of everything in the simulation except `y1` and `y2`.
+To run the simulation I've fixed the values of everything in the simulation except `y1` and `y2`.
 
 
 ```{r exploreModel, include=FALSE}
@@ -168,77 +173,85 @@ occSites <- with(CmcSim, apply(cbind(y1), 1, max)>0)
 ))
 ```
 
-
-Now run the model
+# Fit the model 
+Now fit the model on simulated data
 ```{r runModel}
 # step 1 create an operational from from NIMBLE/JAGS/BUGS code
 model <- nimbleModel(code = modelcode, 
                      constants = list(nsite = nSites, 
                                       nvisit = nVisits,
+                                      cov = sim.pars$cov,
                                       nT = array(data = 5, dim = c(nSites, nVisits)),
-                                      JulDate = round(array(runif(n = nSites*nVisits, 
-                                                                  min = minDate, max = maxDate), 
-                                                            dim = c(nSites, nVisits)), 0)
+                                      JulDate = Dates
                      ),
-                     data = list(y1 = CmcSim$y1), 
+                     data = list(y1 = CmcSim$y1, y2 = CmcSim$y2), 
                      inits = list(z = apply(CmcSim$y1 > 0, 1, max), 
-                                 # mu.psi = simSum["naiveOcc"], 
-                                  #mu.lambda = simSum["meanCount_1"],
-                                 # Comment: mu.psi and mu.lambda are nor in the model.
-                                 # Comment: What did you want to define here?
-                                 #changing those to alpha.s
-                                  alpha.s = simSum["naiveOcc"], 
-                                  #mu.lambda = simSum["meanCount_1"],
+                                  alpha.s = cloglog(simSum["naiveOcc"]),
+                                  beta.s = rnorm(1, 0, 1),
                                   alpha.p = simSum["reportingRate_1"],
                                   beta1 = 180,
-                                  beta2 = 50)
+                                  beta2 = 50,
+                                  Multiplier = 1,
+                                  phScale = 1)
 )
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
-                     monitors = c(#'mu.psi', "mu.lambda", Comment: Have taken this out of the model because it is not defined in the model
-                     'alpha.s',
-                                  'alpha.p', "beta1", "beta2"), 
+                     monitors = c("mu.lambda", #"psi.fs", 
+                                  'alpha.s', "beta.s",
+                                  'alpha.p', "phScale","Multiplier",
+                                  "beta1", "beta2"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
 #about 5 seconds
+
 # step 3 before compiling the MCMC object we need to compile the model first
 Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is necessary
 # 25 seconds (less for fewer nodes)
+
 # now the MCMC (project = NIMBLE model already associated with a project)
 CoccMCMC <- compileNimble(occMCMC, project = model)
 # instantaneous
+
 # and now we can use either $run or runMCMC() on the compiled model object.
 system.time(
-  runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 7500, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
+  runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 25e3, niter = 3e4, nchains = 3, samplesAsCodaMCMC = T)
 ) # 17 seconds for 10K iterations with 3 visits/site
 ```
 
+# Examine the model output
 Plot the MCMC traces
-```{r diagnoseModel}
+```{r diagnoseModel, fig.height = 10, fig.width=7}
 plot1 <- runMCMC_samples %>% ggs() %>% ggs_traceplot(greek = TRUE)
 plot2 <- runMCMC_samples %>% ggs() %>% ggs_density(greek = TRUE)
 gridExtra::grid.arrange(plot1, plot2, ncol=2)
 ```
 
-With the IDM, the phenology parameters are estimated far better than with the occupancy model.
+The phenology parameters are not so well estimated, but the other parameters are estimated quite precisely.
 
-Compare with simulated values
+Have we recovered the simulated values?
 ```{r}
+temp <- unlist(sim.pars[!names(sim.pars) %in% "cov"])
+temp2 <- data.frame(name = names(temp), simulated = temp)
+
 pars <- as.data.frame(summary(runMCMC_samples)$statistics)
-pars$simulated <- sim.pars[match(rownames(pars), names(sim.pars))]
-pars[,c(ncol(pars),1:(ncol(pars)-1))]
+pars$name <- rownames(pars)
+
+#pars$simulated <- unlist(sim.pars[match(rownames(pars), names(sim.pars))])
+
+pars <- merge(temp2, pars, all=TRUE)
+print(pars)
+#pars[,c(ncol(pars),1:(ncol(pars)-1))]
 ```
 
 It would be quite useful to have the median here as well.
 
-Some other diagnostics
+Now extract the Gelman-Rubin statistic (aka Rhat)
 ```{r diagnostics}
 # Rhat
-#gelman.diag(runMCMC_samples) # fails if psi.fs is included
+gelman.diag(runMCMC_samples) # fails if psi.fs is included
 # Autocorrelation plots
 #autocorr.plot(runMCMC_samples)
 ```
-
 
 Plot detection phenology
 ```{r}
