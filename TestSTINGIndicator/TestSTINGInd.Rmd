@@ -4,8 +4,8 @@ author: "Nick Isaac"
 date: "14/02/2023"
 output: html_document
 ---
-
-In this docuent, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme. In this iteration, there are two data types: pan traps and transect walks. Both data types are surveyed on the same day each year. There are `v` visits to `n` sites: both numbers can be modified. We first define the model, then simulate data using user-defined parameters. We then try to recover these parameters for one simulated dataset. At present, the only parameters shared between the data types are those the the detection phenology.
+  
+  In this document, we're exploring the properties of the model proposed for Minimum Viable Scheme for EU Pollinator Monitoring Scheme. In this iteration, there are two data types: pan traps and transect walks. Both data types are surveyed on the same day each year. There are `v` visits to `n` sites: both numbers can be modified. We first define the model, then simulate data using user-defined parameters. We then try to recover these parameters for one simulated dataset. At present, the only parameters shared between the data types are those the the detection phenology.
 
 Next steps:
 - add a covariate on the state model that is shared between data types.
@@ -13,7 +13,6 @@ Next steps:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
 # load the packages, installing where required
 #required.packages <- c("nimble", "ggmcmc", "coda", "reshape2", "ggplot2")
 #installedPackages <- installed.packages()
@@ -45,7 +44,7 @@ sim.pars <- list(sigma.psi = 3, # stdev among sites in cloglog occupancy
 
 Define the model code in Nimble
 ```{r}
-obsMod <- FALSE
+obsMod <- TRUE
 modelcode <- nimbleCode({
     ######################### state model
   for (i in 1:nsite) {
@@ -63,7 +62,6 @@ modelcode <- nimbleCode({
   alpha.s ~ dnorm(0, 0.0001)
   beta.s ~ dnorm(0, 0.0001)
   sigma.psi ~ T(dt(0, 1, 1), 0, Inf) # Half Cauchy
-
 if(obsMod){ # for debugging
   ######################### Obs model
   for (i in 1:nsite) {
@@ -78,7 +76,6 @@ if(obsMod){ # for debugging
       ##### transects 
       y2[i,j] ~ dpois(lambdaThin[i,j]) # Observed counts
       lambdaThin[i,j] <- lambda[i] * pThin[i,j]
-
       #### shared: phenology
       logit(pThin[i,j]) <- phScale * f_JD[JulDate[i,j]]
   }}
@@ -90,7 +87,6 @@ if(obsMod){ # for debugging
   ######################### Seasonality shared effect
   beta1 ~ dunif(1, 365) # peak detectability/activity
   beta2 ~ T(dt(0, 1, 1), 0, 500) # Half Cauchy. Stdev of phenology. At sd=500 the curve is entirely flat
-
   for (d in 1:365){
     f_JD[d] <- 1/((2*3.14159265359)^0.5 * beta2) * exp(-((d - (beta1))^2 / (2* beta2^2)))
     # could simplify this and evaluate only for dates in the dataset
@@ -105,17 +101,20 @@ if(obsMod){ # for debugging
 Next step is to simulate some data for that model
 ```{r}
 # set the parameters for a simulation
+
+
 mcSim <- nimbleModel(modelcode,
                      constants = list(nsite = nSites, 
                                    nvisit = nVisits,
-                                   sigma.psi = sim.pars["sigma.psi"],
-                                   beta1 = sim.pars["beta1"],
-                                   beta2 = sim.pars["beta2"],
-                                   alpha.s = sim.pars["alpha.s"],
-                                   beta.s = sim.pars["beta.s"],
+                                   #Comment: NIMBLE has issues extracting the list, using the dollar  sign made the magic.
+                                   sigma.psi = sim.pars$sigma.psi,
+                                   beta1 = sim.pars$beta1,
+                                   beta2 = sim.pars$beta2,
+                                   alpha.s = sim.pars$alpha.s,
+                                   beta.s = sim.pars$beta.s,
                                    cov = sim.pars$cov,
-                                   phScale = sim.pars["phScale"],
-                                   alpha.p = sim.pars["alpha.p"],
+                                   phScale = sim.pars$phScale,
+                                   alpha.p = sim.pars$alpha.p,
                                    nT = array(data = 5, dim = c(nSites, nVisits)),
                                    JulDate = round(array(runif(n = nSites*nVisits, 
                                                                min = minDate, max = maxDate), 
@@ -123,20 +122,15 @@ mcSim <- nimbleModel(modelcode,
                                 )
                      #inits = as.list(sim.pars)
                      )
-
 CmcSim <- compileNimble(mcSim) # note that we compile the operational model not the code!
-
-
 nodesToSim <- CmcSim$getDependencies(c("psi", "lambda"),# "p1", "pThin"),
                                            self = F, downstream = T)
 nodesToSim
 CmcSim$simulate(nodesToSim)
-
+#CmcSim$simulate()
 head(CmcSim$y1)[, 1:2]
 head(CmcSim$y2)[, 1:2]
-
 ##### temp
-
 #nodesToSim <- CmcSim$getDependencies(c("psi", "lambda", "p1", "pThin"),
 #                                           self = F, downstream = T)
 nodesToSim
@@ -150,17 +144,13 @@ I think I finally understand the simulation: I've fixed the values of everything
 
 ```{r exploreModel, include=FALSE}
 #CmcSim$isData('y1') # FALSE
-
 # plot the dependencies of the model in a graph (only makes sense when the model is very simple)
 #library(igraph)
 #plot(mcSim$getGraph())
-
 # Determining the nodes and variables in a model
 #CmcSim$getVarNames()
-
 #note that lifted nodes can also correspond to different parametrizations
 #CmcSim$getNodeNames()
-
 # Query the model's relationships
 #CmcSim$getDependencies(c('psi'))
 ```
@@ -170,11 +160,11 @@ Summarise the simulated data
 ```{r }
 occSites <- with(CmcSim, apply(cbind(y1), 1, max)>0)
 (simSum  <- c(
-    naiveOcc = mean(occSites),
-    reportingRate = mean(with(CmcSim, y1/5)), # per pan trap
-    meanCount = mean(CmcSim$y2),
-    reportingRate_1 = mean(with(CmcSim, y1/5)[occSites,]), # per pan trap
-    meanCount_1 = mean(CmcSim$y2[occSites,])
+  naiveOcc = mean(occSites),
+  reportingRate = mean(with(CmcSim, y1/5)), # per pan trap
+  meanCount = mean(CmcSim$y2),
+  reportingRate_1 = mean(with(CmcSim, y1/5)[occSites,]), # per pan trap
+  meanCount_1 = mean(CmcSim$y2[occSites,])
 ))
 ```
 
@@ -188,35 +178,38 @@ model <- nimbleModel(code = modelcode,
                                       nT = array(data = 5, dim = c(nSites, nVisits)),
                                       JulDate = round(array(runif(n = nSites*nVisits, 
                                                                   min = minDate, max = maxDate), 
-                                                             dim = c(nSites, nVisits)), 0)
-                                      ),
+                                                            dim = c(nSites, nVisits)), 0)
+                     ),
                      data = list(y1 = CmcSim$y1), 
                      inits = list(z = apply(CmcSim$y1 > 0, 1, max), 
-                                  mu.psi = simSum["naiveOcc"], 
-                                  mu.lambda = simSum["meanCount_1"],
+                                 # mu.psi = simSum["naiveOcc"], 
+                                  #mu.lambda = simSum["meanCount_1"],
+                                 # Comment: mu.psi and mu.lambda are nor in the model.
+                                 # Comment: What did you want to define here?
+                                 #changing those to alpha.s
+                                  alpha.s = simSum["naiveOcc"], 
+                                  #mu.lambda = simSum["meanCount_1"],
                                   alpha.p = simSum["reportingRate_1"],
                                   beta1 = 180,
                                   beta2 = 50)
-                     )
-
+)
 # step 2 build an MCMC object using buildMCMC(). we can add some customization here
 occMCMC <- buildMCMC(model, 
-                     monitors = c('mu.psi', "mu.lambda", 'alpha.p', "beta1", "beta2"), 
+                     monitors = c(#'mu.psi', "mu.lambda", Comment: Have taken this out of the model because it is not defined in the model
+                     'alpha.s',
+                                  'alpha.p', "beta1", "beta2"), 
                      thin = 3, 
                      useConjugacy = FALSE) # useConjugacy controls whether conjugate samplers are assigned when possible
 #about 5 seconds
-
 # step 3 before compiling the MCMC object we need to compile the model first
 Cmodel <- compileNimble(model) # NJBI: I don't understand why this step is necessary
 # 25 seconds (less for fewer nodes)
-
 # now the MCMC (project = NIMBLE model already associated with a project)
 CoccMCMC <- compileNimble(occMCMC, project = model)
 # instantaneous
-
 # and now we can use either $run or runMCMC() on the compiled model object.
 system.time(
-runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 7500, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
+  runMCMC_samples <- runMCMC(CoccMCMC, nburnin = 7500, niter = 10000, nchains = 3, samplesAsCodaMCMC = T)
 ) # 17 seconds for 10K iterations with 3 visits/site
 ```
 
@@ -241,8 +234,7 @@ It would be quite useful to have the median here as well.
 Some other diagnostics
 ```{r diagnostics}
 # Rhat
-gelman.diag(runMCMC_samples) # fails if psi.fs is included
-
+#gelman.diag(runMCMC_samples) # fails if psi.fs is included
 # Autocorrelation plots
 #autocorr.plot(runMCMC_samples)
 ```
@@ -252,27 +244,23 @@ Plot detection phenology
 ```{r}
 beta1 <- melt(sapply(runMCMC_samples, function(x) x[,"beta1"]))$value
 beta2 <- melt(sapply(runMCMC_samples, function(x) x[,"beta2"]))$value
-
 jul_dates <- round(seq(from = 1, to = 365, length.out = 50),0)
-
 pDet <- melt(sapply(jul_dates, function(jd){
-    (1/((2*pi)^0.5 * beta2) * exp(-((jd - beta1)^2 / (2* beta2^2))))
-   }))
-    
+  (1/((2*pi)^0.5 * beta2) * exp(-((jd - beta1)^2 / (2* beta2^2))))
+}))
+
 pDetSumm <- pDet %>% 
   group_by(Var2) %>%
   summarise(mean = mean(value),
             lowerCI = quantile(value, 0.025),
             upperCI = quantile(value, 0.975)
-            ) %>%
+  ) %>%
   ungroup()
-
 pDetSumm$JulDate <- jul_dates[pDetSumm$Var2]
-
 (detPlot <- ggplot(data = pDetSumm, (aes(x=JulDate))) +
-  geom_line(aes(y=mean)) +
-  geom_ribbon(aes(ymin=lowerCI, ymax=upperCI), alpha=0.2) +
-  theme_bw() +
-  xlab("Julian Date (1 = 1st January)") +
-  ylab("Detection modifier"))
+    geom_line(aes(y=mean)) +
+    geom_ribbon(aes(ymin=lowerCI, ymax=upperCI), alpha=0.2) +
+    theme_bw() +
+    xlab("Julian Date (1 = 1st January)") +
+    ylab("Detection modifier"))
 ```
